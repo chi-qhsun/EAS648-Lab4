@@ -1,0 +1,194 @@
+---
+title: "Lab 4"
+author: "Chi Sun"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Data Loading and Preprocessing
+Extracts song titles and lyrics from each file and combines them into a single data frame `lyrics_df`.
+
+Filters out empty lyrics and assigns unique identifiers `(line_id, line_number)` to each line of lyrics.
+```{r,message=FALSE, warning = FALSE}
+library(tidytext)
+library(textdata)
+library(tidyverse)
+library(dplyr)
+library(readr)
+library(readtext)
+library(stringr)
+library(purrr)
+
+txt_directory <- "/Users/qihangsun/Documents/GitHub/EAS648-Lab4"
+file_paths <- list.files(txt_directory, pattern = "\\.txt$", full.names = TRUE)
+afinn = get_sentiments("afinn")
+
+lyrics_list <- lapply(file_paths, function(file_path) {
+  lines <- readLines(file_path, warn = FALSE)
+  song_title <- lines[1]
+  lyrics <- lines[-1]
+  tibble(song_title = song_title, lyrics = lyrics)
+})
+
+lyrics_df <- bind_rows(lyrics_list)
+
+lyrics_df <- lyrics_df %>%
+  filter(lyrics != "" & !is.na(lyrics))
+
+lyrics_df <- lyrics_df %>%
+  mutate(line_id = row_number()) %>%
+  group_by(song_title) %>%
+  mutate(line_number = row_number()) %>%
+  ungroup()
+
+song_sentiment <- lyrics_df %>%
+  unnest_tokens(word, lyrics) %>%
+  inner_join(get_sentiments("afinn"), by = "word") %>%
+  group_by(song_title, line_number) %>%
+  summarize(sentiment_score = sum(value), .groups = 'drop') %>%
+  ungroup() 
+  # Now, if you want to aggregate this to the song level:
+  # group_by(song_title) %>%
+  # summarize(total_sentiment = sum(sentiment_score), .groups = 'drop')
+
+ggplot(song_sentiment, aes(line_number, sentiment_score, fill = song_title)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~song_title)
+```
+
+## Sentiment Analysis Using AFINN
+Tokenizes the lyrics and joins them with the AFINN sentiment lexicon to calculate sentiment scores for each line.
+Summarizes sentiment scores at the song and line level.
+Visualizes the sentiment score for each line using `ggplot2`
+.
+```{r,message=FALSE, warning = FALSE}
+afinn_word_counts <- lyrics_df %>%
+  unnest_tokens(word, lyrics) %>%
+  inner_join(afinn, by = "word") %>%
+  mutate(sentiment = case_when(
+    value > 0 ~ "positive",
+    value < 0 ~ "negative",
+    TRUE ~ "neutral" # 如果有词汇的情感值为0
+  )) %>%
+  count(word, sentiment, sort = TRUE)
+
+afinn_word_counts %>%
+  group_by(sentiment) %>%
+  top_n(10) %>%
+  ungroup() %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(word, n, fill = sentiment)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~sentiment, scales = "free_y") +
+  labs(y = "Contribution to sentiment",
+       x = NULL) +
+  coord_flip()
+```
+
+## Word Count Analysis
+Further analyzes the words in `lyrics_df` using AFINN, categorizing them as positive, negative.
+Counts the frequency of each word by sentiment and visualizes the top contributing words to each sentiment category using a bar plot.
+Generates a word cloud based on word frequencies in the lyrics, excluding stopwords.
+Creates a comparison cloud using sentiment data from the AFINN lexicon.
+```{r,message=FALSE, warning = FALSE}
+library(wordcloud)
+library(reshape2)
+word_counts <- lyrics_df %>%
+  unnest_tokens(word, lyrics) %>%
+  anti_join(stop_words, by = "word") %>%
+  count(word, sort = TRUE)
+# word_counts = filter(word_counts,word != "yeah")
+wordcloud(words = word_counts$word, freq = word_counts$n, min.freq = 1,
+          max.words = 100, random.order = FALSE, rot.per = 0.35, 
+          colors = brewer.pal(8, "Dark2"))
+
+
+comparison_data <- acast(afinn_word_counts, word ~ sentiment, value.var = "n", fill = 0)
+comparison.cloud(comparison_data, max.words = 100, random.order = FALSE,
+                 colors = brewer.pal(8, "Dark2"))
+```
+
+## Sentiment Analysis Using sentimentr
+Conducts sentiment analysis on the lyrics using the `sentimentr` package and visualizes the average sentiment for each line.
+```{r,message=FALSE, warning = FALSE}
+library(sentimentr)
+
+song_sentiment_sent <- lyrics_df %>%
+    get_sentences() %>%
+    sentiment_by(by = c('song_title', 'line_number'))%>%
+  as.data.frame()
+
+ggplot(song_sentiment_sent, aes(line_number, ave_sentiment, fill = song_title)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~song_title)
+```
+
+## Comparison of Sentiment Analysis Methods
+Compares the sentiment scores obtained from the single word estimation and whole sentence estimation.
+Identifies the lines with the greatest differences in sentiment scores between the two methods.
+```{r,message=FALSE, warning = FALSE}
+comp = inner_join(song_sentiment,song_sentiment_sent, by = c("song_title","line_number"))
+comp <- comp %>%
+  mutate(scaled_score = sentiment_score / 5) %>%
+  mutate(diff = ave_sentiment - scaled_score) %>%
+  mutate(label = case_when(
+    diff > 0 ~ "More Positive Than Expected",
+    diff < 0 ~ "More Negative Than Expected",
+    TRUE ~ "As Expected"
+  ))
+
+ggplot(comp, aes(line_number, diff, fill = song_title)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~song_title)
+```
+
+## Final Analysis and Wordcloud of Differences
+Filters lines where the sentiment difference > 0.5 or < -0.5.
+Joins this filtered data with the original lyrics data and tokenizes the lyrics.
+Creates a final word cloud visualizing the words from lines with significant sentiment differences.
+```{r}
+top_differences <- comp %>%
+  arrange(desc(diff))
+
+Spec <- comp %>%
+  filter(diff>0.5 | diff < -0.5) %>%
+  arrange(song_title) %>%
+  select(song_title, line_number, diff,label)
+ 
+Disp <- inner_join(Spec, lyrics_df, by = c("song_title","line_number"))
+Disp$lyrics2 = Disp$lyrics
+Disp<- unnest_tokens(Disp,word,lyrics2) %>%
+  inner_join(afinn, by = "word") %>%
+  select(song_title, line_number, diff, lyrics, word,label)
+
+word_freq <- Disp %>%
+  count(word)
+  
+set.seed(123)
+wordcloud(words = word_freq$word, freq = word_freq$n, min.freq = 1,
+          max.words = 100, random.order = FALSE, rot.per = 0.25, 
+          colors = brewer.pal(8, "Dark2"))
+headfile <- Disp %>%
+  arrange(diff) %>%
+  select(word,lyrics,label)
+options(width = 1000
+)
+print(headfile , n = Inf)
+```
+
+From the Wordcloud I sort out the words that are most easily to be wrongly classified. And, the table shows us how these words are counted wrongly.
+
+From the table, we can drawn the conclusion that using the whole sentence to conduct sentiment estimation is more accurate than using unicharaters. Like
+
+![](/Users/qihangsun/Documents/GitHub/EAS648-Lab4/Die WIth You.png)
+![](/Users/qihangsun/Documents/GitHub/EAS648-Lab4/Better Worth Imagining.png)
+
+However there are more complex context for sentiment estimation.
+Like:
+
+![](/Users/qihangsun/Documents/GitHub/EAS648-Lab4/God Only Help Those.png)
+
+In this case, `sentimentr` considers this sentence to be A NEGATIVE ONE. And it was, if we just see this single sentence. However, the sentence follows this one is "Who learn to help themselves". The tone of the sentences can be totally different when we variate the detection scale.
